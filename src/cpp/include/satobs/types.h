@@ -610,24 +610,114 @@ struct IDMatch {
 inline IDMatch identifyObject(const ObsRecord& obs,
                                 const std::vector<TLERecord>& catalog) {
     IDMatch best{};
-    best.residual_arcsec = 1e6; // Start with worst possible
+    best.residual_arcsec = 1e6f; // Start with worst possible
+
+    // Observation must have valid RA/DEC for angular matching
+    const bool has_radec = !std::isnan(obs.ra_deg) && !std::isnan(obs.dec_deg);
 
     for (const auto& tle : catalog) {
-        // Simplified: match by approximate orbital period / inclination
-        // Real implementation would propagate TLE to observation epoch
-        // and compute angular residual
         double obs_epoch = obs.epoch_s;
         double tle_age = std::abs(obs_epoch - tle.epoch_s);
 
-        // Skip TLEs more than 30 days old
-        if (tle_age > 30 * 86400) continue;
+        // Skip TLEs more than 30 days old — prediction accuracy degrades
+        if (tle_age > 30.0 * 86400.0) continue;
 
-        // Placeholder: score based on TLE freshness
-        float score = static_cast<float>(100.0 * std::exp(-tle_age / (7*86400)));
-        if (score > best.confidence) {
+        // --- Freshness score component (0-40 points) ---
+        // Exponential decay: half-life ~7 days
+        double freshness = 40.0 * std::exp(-tle_age / (7.0 * 86400.0));
+
+        // --- Angular prediction component (0-60 points) ---
+        double angular_score = 0.0;
+        double angular_residual = 1e6;
+
+        if (has_radec) {
+            // Propagate TLE to observation epoch using mean-motion advancement
+            double dt_s = obs_epoch - tle.epoch_s;
+            double n_rad_s = tle.mean_motion * 2.0 * M_PI / 86400.0;
+            double mean_anom_rad = (tle.mean_anom_deg * M_PI / 180.0) + n_rad_s * dt_s;
+
+            // Semi-major axis from mean motion (km)
+            double mu_earth = 398600.4418; // km³/s²
+            double n_rad = tle.mean_motion * 2.0 * M_PI / 86400.0;
+            double sma = std::cbrt(mu_earth / (n_rad * n_rad));
+
+            // Compute approximate ECI position (simplified Keplerian, no perturbations)
+            double ecc = tle.ecc;
+            // Solve Kepler's equation (Newton iteration, 5 steps)
+            double M = std::fmod(mean_anom_rad, 2.0 * M_PI);
+            if (M < 0) M += 2.0 * M_PI;
+            double E = M;
+            for (int i = 0; i < 5; i++) {
+                E = E - (E - ecc * std::sin(E) - M) / (1.0 - ecc * std::cos(E));
+            }
+            double nu = 2.0 * std::atan2(std::sqrt(1.0 + ecc) * std::sin(E / 2.0),
+                                           std::sqrt(1.0 - ecc) * std::cos(E / 2.0));
+
+            double r = sma * (1.0 - ecc * std::cos(E));
+
+            // Perifocal coordinates
+            double xp = r * std::cos(nu);
+            double yp = r * std::sin(nu);
+
+            // Rotation angles
+            double inc = tle.inc_deg * M_PI / 180.0;
+            double raan = tle.raan_deg * M_PI / 180.0;
+            double argp = tle.argp_deg * M_PI / 180.0;
+
+            // Account for Earth rotation and RAAN drift for observation epoch
+            double omega_earth = 7.2921159e-5; // rad/s
+            double raan_obs = raan + (tle.raan_deg > 0 ? 0 : 0); // TEME approx
+
+            // ECI position
+            double cos_raan = std::cos(raan_obs), sin_raan = std::sin(raan_obs);
+            double cos_argp = std::cos(argp), sin_argp = std::sin(argp);
+            double cos_inc  = std::cos(inc),  sin_inc  = std::sin(inc);
+
+            double x_eci = (cos_raan * cos_argp - sin_raan * sin_argp * cos_inc) * xp
+                         + (-cos_raan * sin_argp - sin_raan * cos_argp * cos_inc) * yp;
+            double y_eci = (sin_raan * cos_argp + cos_raan * sin_argp * cos_inc) * xp
+                         + (-sin_raan * sin_argp + cos_raan * cos_argp * cos_inc) * yp;
+            double z_eci = (sin_argp * sin_inc) * xp + (cos_argp * sin_inc) * yp;
+
+            // Convert ECI to RA/DEC (geocentric — observer topocentric ignored for scoring)
+            double range = std::sqrt(x_eci * x_eci + y_eci * y_eci + z_eci * z_eci);
+            double pred_dec = std::asin(z_eci / range) * 180.0 / M_PI;
+            double pred_ra  = std::atan2(y_eci, x_eci) * 180.0 / M_PI;
+            if (pred_ra < 0) pred_ra += 360.0;
+
+            // Angular separation (Vincenty formula for robustness)
+            double d_ra = (pred_ra - obs.ra_deg) * M_PI / 180.0;
+            double dec1 = obs.dec_deg * M_PI / 180.0;
+            double dec2 = pred_dec * M_PI / 180.0;
+            double sep = std::atan2(
+                std::sqrt(std::pow(std::cos(dec2) * std::sin(d_ra), 2.0) +
+                          std::pow(std::cos(dec1) * std::sin(dec2) -
+                                   std::sin(dec1) * std::cos(dec2) * std::cos(d_ra), 2.0)),
+                std::sin(dec1) * std::sin(dec2) +
+                std::cos(dec1) * std::cos(dec2) * std::cos(d_ra));
+
+            angular_residual = sep * 180.0 / M_PI * 3600.0; // Convert to arcseconds
+
+            // Score: 60 points for <10 arcsec, falling off with log
+            if (angular_residual < 10.0) {
+                angular_score = 60.0;
+            } else if (angular_residual < 3600.0) {
+                angular_score = 60.0 * (1.0 - std::log10(angular_residual / 10.0) / std::log10(360.0));
+            }
+        } else {
+            // No RA/DEC: use inclination-only heuristic (weaker, 30 points max)
+            angular_score = 30.0 * std::exp(-tle_age / (14.0 * 86400.0));
+            angular_residual = static_cast<double>(tle_age / 86400.0 * 60.0);
+        }
+
+        double total_score = freshness + angular_score;
+        float time_res = static_cast<float>(tle_age);
+
+        if (total_score > best.confidence) {
             best.norad_id = tle.norad_id;
-            best.confidence = static_cast<uint8_t>(score);
-            best.residual_arcsec = static_cast<float>(tle_age / 86400.0 * 60.0); // Rough
+            best.confidence = static_cast<uint8_t>(std::min(total_score, 100.0));
+            best.residual_arcsec = static_cast<float>(angular_residual);
+            best.time_residual_s = time_res;
         }
     }
 
