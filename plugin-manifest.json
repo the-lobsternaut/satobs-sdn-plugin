@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "name": "satobs-od",
+  "version": "0.1.0",
+  "description": "Satellite Observation & Orbit Determination — ingests citizen space surveillance data from SeeSat-L (IOD format), Mike McCants classfd.tle, space.vimpel.ru, and SatNOGS. Parses IOD positional observations, NORAD TLE catalogs, performs Gauss angles-only orbit determination, and cross-matches observations to classified/untracked objects. Supports photometric flash period analysis for tumble characterization.",
+  "author": "DigitalArsenal",
+  "license": "Apache-2.0",
+  "inputFormats": ["text/plain", "application/json"],
+  "outputFormats": ["$OBS"],
+  "dataSources": [
+    {
+      "name": "SeeSat-L",
+      "url": "https://www.satobs.org/seesat/",
+      "type": "mailing list (IOD format)",
+      "auth": "none"
+    },
+    {
+      "name": "Mike McCants classfd.tle",
+      "url": "https://www.prismnet.com/~mmccants/tles/classfd.zip",
+      "type": "TLE catalog",
+      "auth": "none"
+    },
+    {
+      "name": "Vimpel Corp",
+      "url": "http://space.vimpel.ru",
+      "type": "TLE catalog",
+      "auth": "none"
+    },
+    {
+      "name": "SatNOGS DB",
+      "url": "https://db.satnogs.org/api/",
+      "type": "REST API",
+      "auth": "none (public endpoints)"
+    },
+    {
+      "name": "CelesTrak",
+      "url": "https://celestrak.org/NORAD/elements/",
+      "type": "TLE catalog",
+      "auth": "none"
+    },
+    {
+      "name": "Space-Track.org",
+      "url": "https://www.space-track.org/",
+      "type": "REST API",
+      "auth": "account required"
+    }
+  ]
+}
